@@ -31,6 +31,9 @@ fn process_album(entry: DirEntry) -> Result<()> {
         let name = os_str_to_str(&name)?;
         if !name.starts_with('.') {
             println!("Processando álbum {name:?}");
+            for entry in read_dir(entry.path())? {
+                process_song(entry?)?;
+            }
             return Ok(());
         }
     }
@@ -38,6 +41,22 @@ fn process_album(entry: DirEntry) -> Result<()> {
     let path = entry.path();
     let path = os_str_to_str(path.as_os_str())?;
     println!("Ignorando {path:?}");
+    Ok(())
+}
+
+fn process_song(entry: DirEntry) -> Result<()> {
+    if entry.file_type()?.is_file() {
+        let name = entry.file_name();
+        let name = os_str_to_str(&name)?;
+        if !name.starts_with('.') {
+            println!("  Processando música {name:?}");
+            return Ok(());
+        }
+    }
+
+    let path = entry.path();
+    let path = os_str_to_str(path.as_os_str())?;
+    println!("  Ignorando {path:?}");
     Ok(())
 }
 
