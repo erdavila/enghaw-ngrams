@@ -1,8 +1,4 @@
-use std::{
-    env,
-    ffi::OsStr,
-    fs::{read_dir, DirEntry},
-};
+use std::{env, ffi::OsStr, fs::read_dir, path::PathBuf};
 
 use anyhow::{anyhow, bail, Result};
 
@@ -19,44 +15,49 @@ fn main() -> Result<()> {
     }
 
     for entry in read_dir(&base_dir)? {
-        process_album(entry?)?;
-    }
-
-    Ok(())
-}
-
-fn process_album(entry: DirEntry) -> Result<()> {
-    if entry.file_type()?.is_dir() {
-        let name = entry.file_name();
-        let name = os_str_to_str(&name)?;
-        if !name.starts_with('.') {
-            println!("Processando álbum {name:?}");
-            for entry in read_dir(entry.path())? {
-                process_song(entry?)?;
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            let name = entry.file_name();
+            let name = os_str_to_str(&name)?;
+            if !name.starts_with('.') {
+                process_album(name, entry.path())?;
+                continue;
             }
-            return Ok(());
         }
+
+        print_ignoring(entry.path())?;
     }
 
-    let path = entry.path();
-    let path = os_str_to_str(path.as_os_str())?;
-    println!("Ignorando {path:?}");
     Ok(())
 }
 
-fn process_song(entry: DirEntry) -> Result<()> {
-    if entry.file_type()?.is_file() {
-        let name = entry.file_name();
-        let name = os_str_to_str(&name)?;
-        if !name.starts_with('.') {
-            println!("  Processando música {name:?}");
-            return Ok(());
+fn process_album(name: &str, path: PathBuf) -> Result<()> {
+    println!("Processando álbum {name:?}");
+
+    for entry in read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let name = entry.file_name();
+            let name = os_str_to_str(&name)?;
+            if !name.starts_with('.') {
+                process_song(name, entry.path())?;
+                continue;
+            }
         }
+
+        print_ignoring(entry.path())?;
     }
 
-    let path = entry.path();
-    let path = os_str_to_str(path.as_os_str())?;
-    println!("  Ignorando {path:?}");
+    Ok(())
+}
+
+fn print_ignoring(path: PathBuf) -> Result<()> {
+    println!("Ignorando {:?}", os_str_to_str(path.as_os_str())?);
+    Ok(())
+}
+
+fn process_song(name: &str, path: PathBuf) -> Result<()> {
+    println!("  Processando música {name:?}");
     Ok(())
 }
 
