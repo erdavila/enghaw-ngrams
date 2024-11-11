@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     env,
     ffi::OsStr,
+    fmt::Display,
     fs::{read_dir, File},
     io::{BufRead, BufReader},
     path::Path,
@@ -10,7 +11,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Result};
 
-type SongNGrams = Vec<HashMap<Vec<Word>, usize>>;
+type SongNGrams = Vec<HashMap<NGram, usize>>;
 type AlbumNGrams = Vec<(SongName, SongNGrams)>;
 
 const DEFAULT_MAX_NGRAM_SIZE: usize = 5;
@@ -25,7 +26,29 @@ fn main() -> Result<()> {
         bail!("Parâmetros em excesso");
     }
 
-    let _ = process_base_dir(&base_dir)?;
+    let data = process_base_dir(&base_dir)?;
+    let data = aggregate(data);
+
+    for (i, ngrams_occurrences) in data.into_iter().enumerate().rev() {
+        let ngram_size = i + 1;
+        println!("N-Gram de tamanho {ngram_size}");
+
+        let mut ngrams_occurrences: Vec<_> = ngrams_occurrences.into_iter().collect();
+        ngrams_occurrences.sort_by_key(|(_, occurs)| occurs.len());
+
+        let mut max_count = None;
+        for (ngram, occurrences) in ngrams_occurrences.into_iter().rev() {
+            if max_count.is_some_and(|x| occurrences.len() < x) {
+                break;
+            }
+            max_count = Some(occurrences.len());
+
+            println!("  {ngram}");
+            for (album_name, song_name) in occurrences {
+                println!("    {album_name} / {song_name}");
+            }
+        }
+    }
 
     Ok(())
 }
@@ -64,6 +87,7 @@ fn process_album(name: &str, path: &Path) -> Result<AlbumNGrams> {
             let name = entry.file_name();
             let name = os_str_to_str(&name)?;
             if !name.starts_with('.') {
+                let name = name.strip_suffix(".txt").unwrap_or(name);
                 let ngram_counts = process_song(name, &entry.path())?;
                 let song_name = SongName(Rc::from(name.to_owned()));
                 album_ngrams.push((song_name, ngram_counts));
@@ -101,7 +125,7 @@ fn process_song(name: &str, path: &Path) -> Result<SongNGrams> {
                 break;
             }
 
-            let ngram = ngram_buffer.iter().take(ngram_size).cloned().collect();
+            let ngram = NGram(ngram_buffer.iter().take(ngram_size).cloned().collect());
             ngram_counts
                 .entry(ngram)
                 .and_modify(|count| *count += 1)
@@ -142,14 +166,70 @@ fn process_song(name: &str, path: &Path) -> Result<SongNGrams> {
     Ok(ngram_counts)
 }
 
+fn aggregate(
+    data: Vec<(AlbumName, AlbumNGrams)>,
+) -> Vec<HashMap<NGram, Vec<(AlbumName, SongName)>>> {
+    let mut aggregated_data =
+        vec![HashMap::<NGram, Vec<(AlbumName, SongName)>>::new(); DEFAULT_MAX_NGRAM_SIZE];
+
+    for (album_name, album_ngrams) in data {
+        for (song_name, song_ngrams) in album_ngrams {
+            for (i, ngram_counts) in song_ngrams.into_iter().enumerate() {
+                let aggregated_data = &mut aggregated_data[i];
+
+                for ngram in ngram_counts.into_keys() {
+                    aggregated_data
+                        .entry(ngram)
+                        .and_modify(|names: &mut _| {
+                            names.push((album_name.clone(), song_name.clone()));
+                        })
+                        .or_insert(vec![(album_name.clone(), song_name.clone())]);
+                }
+            }
+        }
+    }
+
+    aggregated_data
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct AlbumName(Rc<str>);
+impl Display for AlbumName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct SongName(Rc<str>);
+impl Display for SongName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct Word(Rc<str>);
+impl Display for Word {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+struct NGram(Vec<Word>);
+impl Display for NGram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[")?;
+        for (i, word) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{word}")?;
+        }
+        write!(f, "]")
+    }
+}
 
 fn os_str_to_str(os_str: &OsStr) -> Result<&str> {
     os_str
