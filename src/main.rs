@@ -10,6 +10,9 @@ use std::{
 
 use anyhow::{anyhow, bail, Result};
 
+type SongNGrams = Vec<HashMap<Vec<Word>, usize>>;
+type AlbumNGrams = Vec<(SongName, SongNGrams)>;
+
 const DEFAULT_MAX_NGRAM_SIZE: usize = 5;
 
 fn main() -> Result<()> {
@@ -22,13 +25,24 @@ fn main() -> Result<()> {
         bail!("Parâmetros em excesso");
     }
 
-    for entry in read_dir(&base_dir)? {
+    let _ = process_base_dir(&base_dir)?;
+
+    Ok(())
+}
+
+fn process_base_dir(path: &str) -> Result<Vec<(AlbumName, AlbumNGrams)>> {
+    let mut data = Vec::new();
+
+    for entry in read_dir(path)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let name = entry.file_name();
             let name = os_str_to_str(&name)?;
             if !name.starts_with('.') {
-                process_album(name, &entry.path())?;
+                let album_ngrams = process_album(name, &entry.path())?;
+                let album_name = AlbumName(Rc::from(name.to_owned()));
+                data.push((album_name, album_ngrams));
+
                 continue;
             }
         }
@@ -36,11 +50,13 @@ fn main() -> Result<()> {
         print_ignoring(&entry.path())?;
     }
 
-    Ok(())
+    Ok(data)
 }
 
-fn process_album(name: &str, path: &Path) -> Result<()> {
+fn process_album(name: &str, path: &Path) -> Result<AlbumNGrams> {
     println!("Processando álbum {name:?}");
+
+    let mut album_ngrams = Vec::new();
 
     for entry in read_dir(path)? {
         let entry = entry?;
@@ -49,16 +65,8 @@ fn process_album(name: &str, path: &Path) -> Result<()> {
             let name = os_str_to_str(&name)?;
             if !name.starts_with('.') {
                 let ngram_counts = process_song(name, &entry.path())?;
-
-                for (i, ngram_counts) in ngram_counts.into_iter().enumerate().rev() {
-                    let ngram_size = i + 1;
-                    let mut ngram_counts: Vec<_> = ngram_counts.into_iter().collect();
-                    ngram_counts.sort_by_key(|(_, count)| *count);
-                    println!(">>>> n-gram size: {ngram_size}");
-                    for (ngram, count) in ngram_counts.into_iter().rev() {
-                        println!(">>>>>> {ngram:?}: {count}");
-                    }
-                }
+                let song_name = SongName(Rc::from(name.to_owned()));
+                album_ngrams.push((song_name, ngram_counts));
 
                 continue;
             }
@@ -67,7 +75,7 @@ fn process_album(name: &str, path: &Path) -> Result<()> {
         print_ignoring(&entry.path())?;
     }
 
-    Ok(())
+    Ok(album_ngrams)
 }
 
 fn print_ignoring(path: &Path) -> Result<()> {
@@ -75,7 +83,7 @@ fn print_ignoring(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn process_song(name: &str, path: &Path) -> Result<Vec<HashMap<Vec<Word>, usize>>> {
+fn process_song(name: &str, path: &Path) -> Result<SongNGrams> {
     println!("  Processando música {name:?}");
 
     let mut ngram_counts = vec![HashMap::new(); DEFAULT_MAX_NGRAM_SIZE];
@@ -133,6 +141,12 @@ fn process_song(name: &str, path: &Path) -> Result<Vec<HashMap<Vec<Word>, usize>
 
     Ok(ngram_counts)
 }
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+struct AlbumName(Rc<str>);
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+struct SongName(Rc<str>);
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct Word(Rc<str>);
