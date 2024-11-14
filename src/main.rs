@@ -30,9 +30,12 @@ fn main() -> Result<()> {
     let data = aggregate(data);
 
     let mut ngrams_occurrences: Vec<_> = data.into_iter().collect();
-    ngrams_occurrences.sort_by_key(|(_, occurs)| occurs.len());
+    ngrams_occurrences.sort_by(|(ngram_a, occurrs_a), (ngram_b, occurrs_b)| {
+        let occurs = occurrs_a.len().cmp(&occurrs_b.len());
+        occurs.reverse().then_with(|| ngram_a.cmp(ngram_b))
+    });
 
-    for (ngram, occurrences) in ngrams_occurrences.into_iter().rev() {
+    for (ngram, occurrences) in ngrams_occurrences {
         if occurrences.len() < args.min_occurrences {
             break;
         }
