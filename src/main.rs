@@ -1,8 +1,8 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     ffi::OsStr,
     fmt::Display,
-    fs::{read_dir, File},
+    fs::{read_dir, DirEntry, File, FileType},
     io::{BufRead, BufReader},
     path::Path,
     rc::Rc,
@@ -48,22 +48,12 @@ fn main() -> Result<()> {
 fn process_base_dir(path: &str, ngrams_size: usize) -> Result<Vec<(AlbumName, AlbumNGrams)>> {
     let mut data = Vec::new();
 
-    for entry in read_dir(path)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            let name = entry.file_name();
-            let name = os_str_to_str(&name)?;
-            if !name.starts_with('.') {
-                let album_ngrams = process_album(name, &entry.path(), ngrams_size)?;
-                let album_name = AlbumName(Rc::from(name.to_owned()));
-                data.push((album_name, album_ngrams));
-
-                continue;
-            }
-        }
-
-        print_ignoring(&entry.path())?;
-    }
+    process_entries(path, EntryType::Directory, |name, entry| {
+        let album_ngrams = process_album(name, &entry.path(), ngrams_size)?;
+        let album_name = AlbumName(Rc::from(name.to_owned()));
+        data.push((album_name, album_ngrams));
+        Ok(())
+    })?;
 
     Ok(data)
 }
@@ -73,17 +63,43 @@ fn process_album(name: &str, path: &Path, ngrams_size: usize) -> Result<AlbumNGr
 
     let mut album_ngrams = Vec::new();
 
+    process_entries(path, EntryType::File, |name, entry| {
+        let name = name.strip_suffix(".txt").unwrap_or(name);
+        let ngram_counts = process_song(name, &entry.path(), ngrams_size)?;
+        let song_name = SongName(Rc::from(name.to_owned()));
+        album_ngrams.push((song_name, ngram_counts));
+        Ok(())
+    })?;
+
+    Ok(album_ngrams)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum EntryType {
+    File,
+    Directory,
+}
+impl EntryType {
+    fn matches(self, file_type: FileType) -> bool {
+        match self {
+            EntryType::File => file_type.is_file(),
+            EntryType::Directory => file_type.is_dir(),
+        }
+    }
+}
+
+fn process_entries(
+    path: impl AsRef<Path>,
+    entry_type: EntryType,
+    mut process_entry: impl FnMut(&str, DirEntry) -> Result<()>,
+) -> Result<()> {
     for entry in read_dir(path)? {
         let entry = entry?;
-        if entry.file_type()?.is_file() {
+        if entry_type.matches(entry.file_type()?) {
             let name = entry.file_name();
             let name = os_str_to_str(&name)?;
             if !name.starts_with('.') {
-                let name = name.strip_suffix(".txt").unwrap_or(name);
-                let ngram_counts = process_song(name, &entry.path(), ngrams_size)?;
-                let song_name = SongName(Rc::from(name.to_owned()));
-                album_ngrams.push((song_name, ngram_counts));
-
+                process_entry(name, entry)?;
                 continue;
             }
         }
@@ -91,7 +107,7 @@ fn process_album(name: &str, path: &Path, ngrams_size: usize) -> Result<AlbumNGr
         print_ignoring(&entry.path())?;
     }
 
-    Ok(album_ngrams)
+    Ok(())
 }
 
 fn print_ignoring(path: &Path) -> Result<()> {
@@ -128,22 +144,19 @@ fn process_song(name: &str, path: &Path, ngrams_size: usize) -> Result<SongNGram
 
         let mut s: Option<String> = None;
         for char in line.chars() {
-            s = if char.is_alphanumeric() || char == '-' {
+            if char.is_alphanumeric() || char == '-' {
                 let chars = char.to_lowercase();
-                let s = match s {
-                    Some(mut s) => {
+                match &mut s {
+                    Some(s) => {
                         s.extend(chars);
-                        s
                     }
-                    None => chars.collect(),
-                };
-                Some(s)
-            } else {
-                if let Some(s) = s {
-                    increment(s);
+                    None => {
+                        s = Some(chars.collect());
+                    }
                 }
-                None
-            };
+            } else if let Some(s) = s.take() {
+                increment(s);
+            }
         }
 
         if let Some(s) = s {
@@ -155,17 +168,20 @@ fn process_song(name: &str, path: &Path, ngrams_size: usize) -> Result<SongNGram
 }
 
 fn aggregate(data: Vec<(AlbumName, AlbumNGrams)>) -> HashMap<NGram, Vec<(AlbumName, SongName)>> {
-    let mut aggregated_data = HashMap::<NGram, Vec<(AlbumName, SongName)>>::new();
+    let mut aggregated_data = HashMap::<_, Vec<_>>::new();
 
     for (album_name, album_ngrams) in data {
         for (song_name, song_ngrams) in album_ngrams {
             for ngram in song_ngrams.into_keys() {
-                aggregated_data
-                    .entry(ngram)
-                    .and_modify(|names: &mut _| {
-                        names.push((album_name.clone(), song_name.clone()));
-                    })
-                    .or_insert(vec![(album_name.clone(), song_name.clone())]);
+                let album_and_song_name = (album_name.clone(), song_name.clone());
+                match aggregated_data.entry(ngram) {
+                    Entry::Occupied(entry) => {
+                        entry.into_mut().push(album_and_song_name);
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(vec![album_and_song_name]);
+                    }
+                }
             }
         }
     }
