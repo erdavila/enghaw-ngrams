@@ -18,6 +18,9 @@ type AlbumNGrams = Vec<(SongName, SongNGrams)>;
 struct Args {
     ngrams_size: usize,
     base_dir: String,
+
+    #[arg(short, long, default_value_t = 2, value_name = "N")]
+    min_occurrences: usize,
 }
 
 fn main() -> Result<()> {
@@ -29,12 +32,10 @@ fn main() -> Result<()> {
     let mut ngrams_occurrences: Vec<_> = data.into_iter().collect();
     ngrams_occurrences.sort_by_key(|(_, occurs)| occurs.len());
 
-    let mut max_count = None;
     for (ngram, occurrences) in ngrams_occurrences.into_iter().rev() {
-        if max_count.is_some_and(|x| occurrences.len() < x) {
+        if occurrences.len() < args.min_occurrences {
             break;
         }
-        max_count = Some(occurrences.len());
 
         println!("  {ngram}");
         for (album_name, song_name) in occurrences {
