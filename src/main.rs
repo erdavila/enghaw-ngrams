@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::Entry, HashMap, VecDeque},
+    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
     ffi::OsStr,
     fmt::Display,
     fs::{read_dir, DirEntry, File, FileType},
@@ -11,7 +11,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use clap::Parser;
 
-type SongNGrams = HashMap<NGram, usize>;
+type SongNGrams = HashSet<NGram>;
 type AlbumNGrams = Vec<(SongName, SongNGrams)>;
 
 #[derive(Parser, Debug)]
@@ -122,9 +122,9 @@ fn print_ignoring(path: &Path) -> Result<()> {
 fn process_song(name: &str, path: &Path, ngrams_size: usize) -> Result<SongNGrams> {
     println!("  Processando música {name:?}");
 
-    let mut ngram_counts = HashMap::new();
+    let mut ngram_counts = HashSet::new();
     let mut ngram_buffer = VecDeque::with_capacity(ngrams_size);
-    let mut increment = |s| {
+    let mut process_word = |s| {
         let word = Word(Rc::from(s));
 
         if ngram_buffer.len() == ngrams_size {
@@ -134,10 +134,7 @@ fn process_song(name: &str, path: &Path, ngrams_size: usize) -> Result<SongNGram
 
         if ngram_buffer.len() == ngrams_size {
             let ngram = NGram(ngram_buffer.iter().cloned().collect());
-            ngram_counts
-                .entry(ngram)
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
+            ngram_counts.insert(ngram);
         }
     };
 
@@ -159,12 +156,12 @@ fn process_song(name: &str, path: &Path, ngrams_size: usize) -> Result<SongNGram
                     }
                 }
             } else if let Some(s) = s.take() {
-                increment(s);
+                process_word(s);
             }
         }
 
         if let Some(s) = s {
-            increment(s);
+            process_word(s);
         }
     }
 
@@ -176,7 +173,7 @@ fn aggregate(data: Vec<(AlbumName, AlbumNGrams)>) -> HashMap<NGram, Vec<(AlbumNa
 
     for (album_name, album_ngrams) in data {
         for (song_name, song_ngrams) in album_ngrams {
-            for ngram in song_ngrams.into_keys() {
+            for ngram in song_ngrams {
                 let album_and_song_name = (album_name.clone(), song_name.clone());
                 match aggregated_data.entry(ngram) {
                     Entry::Occupied(entry) => {
