@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet},
     ffi::OsStr,
     fmt::Display,
     fs::{read_dir, DirEntry, File, FileType},
@@ -8,11 +8,10 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Ok, Result};
 use clap::Parser;
 
-type SongNGrams = HashSet<NGram>;
-type AlbumNGrams = Vec<(SongName, SongNGrams)>;
+type AlbumTokens = Vec<(SongName, Vec<Token>)>;
 type Location = (AlbumName, SongName);
 
 #[derive(Parser, Debug)]
@@ -30,8 +29,8 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let data = process_base_dir(&args.base_dir, args.max_ngrams_size)?;
-    let data = aggregate(data);
+    let data = load_tokens(&args.base_dir)?;
+    let data = extract_ngrams(&data, args.max_ngrams_size);
 
     let data = prepare_max_size_ngrams(data);
     let mut data = consolidate(data, args.min_locations);
@@ -46,33 +45,33 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn process_base_dir(path: &str, ngrams_size: usize) -> Result<Vec<(AlbumName, AlbumNGrams)>> {
+fn load_tokens(path: &str) -> Result<Vec<(AlbumName, AlbumTokens)>> {
     let mut data = Vec::new();
 
     process_entries(path, EntryType::Directory, |name, entry| {
-        let album_ngrams = process_album(name, &entry.path(), ngrams_size)?;
+        let album_tokens = process_album(name, &entry.path())?;
         let album_name = AlbumName(Rc::from(name.to_owned()));
-        data.push((album_name, album_ngrams));
+        data.push((album_name, album_tokens));
         Ok(())
     })?;
 
     Ok(data)
 }
 
-fn process_album(name: &str, path: &Path, ngrams_size: usize) -> Result<AlbumNGrams> {
+fn process_album(name: &str, path: &Path) -> Result<Vec<(SongName, Vec<Token>)>> {
     println!("Processando álbum {name:?}");
 
-    let mut album_ngrams = Vec::new();
+    let mut album_tokens = Vec::new();
 
     process_entries(path, EntryType::File, |name, entry| {
         let name = name.strip_suffix(".txt").unwrap_or(name);
-        let ngram_counts = process_song(name, &entry.path(), ngrams_size)?;
+        let song_tokens = process_song(name, &entry.path())?;
         let song_name = SongName(Rc::from(name.to_owned()));
-        album_ngrams.push((song_name, ngram_counts));
+        album_tokens.push((song_name, song_tokens));
         Ok(())
     })?;
 
-    Ok(album_ngrams)
+    Ok(album_tokens)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -116,24 +115,10 @@ fn print_ignoring(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn process_song(name: &str, path: &Path, ngrams_size: usize) -> Result<SongNGrams> {
+fn process_song(name: &str, path: &Path) -> Result<Vec<Token>> {
     println!("  Processando música {name:?}");
 
-    let mut ngram_counts = HashSet::new();
-    let mut ngram_buffer = VecDeque::with_capacity(ngrams_size);
-    let mut process_word = |s| {
-        let word = Word(Rc::from(s));
-
-        if ngram_buffer.len() == ngrams_size {
-            ngram_buffer.pop_front();
-        }
-        ngram_buffer.push_back(word);
-
-        if ngram_buffer.len() == ngrams_size {
-            let ngram = NGram(ngram_buffer.iter().cloned().collect());
-            ngram_counts.insert(ngram);
-        }
-    };
+    let mut song_tokens = Vec::new();
 
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -153,38 +138,51 @@ fn process_song(name: &str, path: &Path, ngrams_size: usize) -> Result<SongNGram
                     }
                 }
             } else if let Some(s) = s.take() {
-                process_word(s);
+                song_tokens.push(Token(s));
             }
         }
 
         if let Some(s) = s {
-            process_word(s);
+            song_tokens.push(Token(s));
         }
     }
 
-    Ok(ngram_counts)
+    Ok(song_tokens)
 }
 
-fn aggregate(data: Vec<(AlbumName, AlbumNGrams)>) -> HashMap<NGram, BTreeSet<Location>> {
-    let mut aggregated_data = HashMap::<_, BTreeSet<_>>::new();
+fn extract_ngrams(
+    data: &Vec<(AlbumName, AlbumTokens)>,
+    ngrams_size: usize,
+) -> HashMap<NGram, BTreeSet<Location>> {
+    let mut ngrams: HashMap<_, BTreeSet<_>> = HashMap::new();
 
-    for (album_name, album_ngrams) in data {
-        for (song_name, song_ngrams) in album_ngrams {
-            for ngram in song_ngrams {
-                let album_and_song_name = (album_name.clone(), song_name.clone());
-                match aggregated_data.entry(ngram) {
-                    Entry::Occupied(entry) => {
-                        entry.into_mut().insert(album_and_song_name);
-                    }
-                    Entry::Vacant(entry) => {
-                        entry.insert(BTreeSet::from([album_and_song_name]));
-                    }
-                }
+    for (album_name, album_tokens) in data {
+        for (song_name, song_tokens) in album_tokens {
+            if ngrams_size > song_tokens.len() {
+                println!("Tokens insuficientes em {album_name} / {song_name}");
+                continue;
+            }
+
+            for i in 0..=(song_tokens.len() - ngrams_size) {
+                let ngram = &song_tokens[i..(i + ngrams_size)];
+                let ngram = NGram(
+                    ngram
+                        .iter()
+                        .map(|token| Word(Rc::from(token.0.clone())))
+                        .collect(),
+                );
+
+                ngrams
+                    .entry(ngram)
+                    .and_modify(|locations: &mut _| {
+                        locations.insert((album_name.clone(), song_name.clone()));
+                    })
+                    .or_insert_with(|| BTreeSet::from([(album_name.clone(), song_name.clone())]));
             }
         }
     }
 
-    aggregated_data
+    ngrams
 }
 
 struct ProcessingInfo<'a> {
@@ -340,6 +338,9 @@ impl Display for Word {
         write!(f, "{}", self.0)
     }
 }
+
+#[derive(Debug)]
+struct Token(String);
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct NGram(Vec<Word>);
