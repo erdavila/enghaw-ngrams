@@ -12,7 +12,7 @@ use anyhow::{anyhow, Ok, Result};
 use clap::Parser;
 
 type AlbumTokens = Vec<(SongName, Vec<Token>)>;
-type Location = (AlbumName, SongName);
+type Location<'loc> = (&'loc AlbumName, &'loc SongName);
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -50,7 +50,7 @@ fn load_tokens(path: &str) -> Result<Vec<(AlbumName, AlbumTokens)>> {
 
     process_entries(path, EntryType::Directory, |name, entry| {
         let album_tokens = process_album(name, &entry.path())?;
-        let album_name = AlbumName(Rc::from(name.to_owned()));
+        let album_name = AlbumName(name.to_owned());
         data.push((album_name, album_tokens));
         Ok(())
     })?;
@@ -66,7 +66,7 @@ fn process_album(name: &str, path: &Path) -> Result<Vec<(SongName, Vec<Token>)>>
     process_entries(path, EntryType::File, |name, entry| {
         let name = name.strip_suffix(".txt").unwrap_or(name);
         let song_tokens = process_song(name, &entry.path())?;
-        let song_name = SongName(Rc::from(name.to_owned()));
+        let song_name = SongName(name.to_owned());
         album_tokens.push((song_name, song_tokens));
         Ok(())
     })?;
@@ -175,9 +175,9 @@ fn extract_ngrams(
                 ngrams
                     .entry(ngram)
                     .and_modify(|locations: &mut _| {
-                        locations.insert((album_name.clone(), song_name.clone()));
+                        locations.insert((album_name, song_name));
                     })
-                    .or_insert_with(|| BTreeSet::from([(album_name.clone(), song_name.clone())]));
+                    .or_insert_with(|| BTreeSet::from([(album_name, song_name)]));
             }
         }
     }
@@ -185,11 +185,11 @@ fn extract_ngrams(
     ngrams
 }
 
-struct ProcessingInfo<'a> {
-    locations: BTreeSet<Location>,
-    shown_in: HashSet<&'a BTreeSet<Location>>,
+struct ProcessingInfo<'loc, 'info> {
+    locations: BTreeSet<Location<'loc>>,
+    shown_in: HashSet<&'info BTreeSet<Location<'loc>>>,
 }
-impl<'a> ProcessingInfo<'a> {
+impl<'loc, 'info> ProcessingInfo<'loc, 'info> {
     fn new() -> Self {
         ProcessingInfo {
             locations: BTreeSet::new(),
@@ -197,8 +197,8 @@ impl<'a> ProcessingInfo<'a> {
         }
     }
 
-    fn add(&mut self, info: &'a Info) {
-        self.locations.extend(info.locations.iter().cloned());
+    fn add(&mut self, info: &'info Info<'loc>) {
+        self.locations.extend(&info.locations);
         match &info.show_decision {
             ShowDecision::Show => {
                 self.shown_in.insert(&info.locations);
@@ -212,7 +212,7 @@ impl<'a> ProcessingInfo<'a> {
 
 fn prepare_max_size_ngrams(
     data: HashMap<NGram, BTreeSet<Location>>,
-) -> HashMap<NGram, ProcessingInfo<'static>> {
+) -> HashMap<NGram, ProcessingInfo> {
     data.into_iter()
         .map(|(ngram, locations)| {
             let pi = ProcessingInfo {
@@ -224,19 +224,22 @@ fn prepare_max_size_ngrams(
         .collect()
 }
 
-struct Info {
+struct Info<'loc> {
     ngram: NGram,
-    locations: BTreeSet<Location>,
-    show_decision: ShowDecision,
+    locations: BTreeSet<Location<'loc>>,
+    show_decision: ShowDecision<'loc>,
 }
 
 #[derive(PartialEq, Eq, Debug)]
-enum ShowDecision {
+enum ShowDecision<'loc> {
     Show,
-    ShownIn(HashSet<BTreeSet<Location>>),
+    ShownIn(HashSet<BTreeSet<Location<'loc>>>),
 }
 
-fn consolidate(ngrams: HashMap<NGram, ProcessingInfo>, min_locations: usize) -> Vec<Info> {
+fn consolidate<'loc>(
+    ngrams: HashMap<NGram, ProcessingInfo<'loc, '_>>,
+    min_locations: usize,
+) -> Vec<Info<'loc>> {
     ngrams
         .into_iter()
         .map(|(ngram, pi)| {
@@ -286,7 +289,10 @@ fn print_ngrams_with_size(ngrams_size: usize, data: &mut Vec<Info>) {
     }
 }
 
-fn generate_shorter_ngrams(ngrams_size: usize, data: &Vec<Info>) -> HashMap<NGram, ProcessingInfo> {
+fn generate_shorter_ngrams<'loc, 'info>(
+    ngrams_size: usize,
+    data: &'info Vec<Info<'loc>>,
+) -> HashMap<NGram, ProcessingInfo<'loc, 'info>> {
     let mut output: HashMap<_, ProcessingInfo> = HashMap::new();
 
     for info in data {
@@ -315,16 +321,16 @@ fn generate_shorter_ngrams(ngrams_size: usize, data: &Vec<Info>) -> HashMap<NGra
     output
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-struct AlbumName(Rc<str>);
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+struct AlbumName(String);
 impl Display for AlbumName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-struct SongName(Rc<str>);
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+struct SongName(String);
 impl Display for SongName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -380,18 +386,14 @@ mod tests {
     }
 
     macro_rules! locations {
-        ($( $location:ident )+) => {
-            BTreeSet::from([
-                $(
-                    {
-                        let str = Rc::from(stringify!($location));
-                        let album_name = AlbumName(Rc::clone(&str));
-                        let song_name = SongName(Rc::clone(&str));
-                        let location: Location = (album_name, song_name);
-                        location
-                    }
-                ),+
-            ])
+        ($( $album_name:ident / $song_name:ident ),+) => {
+            BTreeSet::from(
+                [
+                    $(
+                            (&$album_name, &$song_name)
+                    ),+
+                ]
+            )
         };
     }
 
@@ -429,192 +431,204 @@ mod tests {
     #[test]
     fn case_1() {
         const MIN_LOCATIONS: usize = 1;
+        let album = AlbumName("ALBUM".to_string());
+        let song1 = SongName("S1".to_string());
+        let song2 = SongName("S2".to_string());
 
         let data = HashMap::from([
-            (ngram![A B C X Y], locations![L1]),
-            (ngram![D E F X Y], locations![L2]),
+            (ngram![A B C X Y], locations![album / song1]),
+            (ngram![D E F X Y], locations![album / song2]),
         ]);
         let data = prepare_max_size_ngrams(data);
         let data = consolidate(data, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C X Y], locations![L1], true;
-            ngram![D E F X Y], locations![L2], true;
+            ngram![A B C X Y], locations![album/song1], true;
+            ngram![D E F X Y], locations![album/song2], true;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(4, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C X], locations![L1], false;
-            ngram![B C X Y], locations![L1], false;
-            ngram![D E F X], locations![L2], false;
-            ngram![E F X Y], locations![L2], false;
+            ngram![A B C X], locations![album/song1], false;
+            ngram![B C X Y], locations![album/song1], false;
+            ngram![D E F X], locations![album/song2], false;
+            ngram![E F X Y], locations![album/song2], false;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(3, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C], locations![L1], false;
-            ngram![B C X], locations![L1], false;
-            ngram![C X Y], locations![L1], false;
-            ngram![D E F], locations![L2], false;
-            ngram![E F X], locations![L2], false;
-            ngram![F X Y], locations![L2], false;
+            ngram![A B C], locations![album/song1], false;
+            ngram![B C X], locations![album/song1], false;
+            ngram![C X Y], locations![album/song1], false;
+            ngram![D E F], locations![album/song2], false;
+            ngram![E F X], locations![album/song2], false;
+            ngram![F X Y], locations![album/song2], false;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(2, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B], locations![L1], false;
-            ngram![B C], locations![L1], false;
-            ngram![C X], locations![L1], false;
-            ngram![D E], locations![L2], false;
-            ngram![E F], locations![L2], false;
-            ngram![F X], locations![L2], false;
-            ngram![X Y], locations![L1 L2], true;
+            ngram![A B], locations![album/song1], false;
+            ngram![B C], locations![album/song1], false;
+            ngram![C X], locations![album/song1], false;
+            ngram![D E], locations![album/song2], false;
+            ngram![E F], locations![album/song2], false;
+            ngram![F X], locations![album/song2], false;
+            ngram![X Y], locations![album/song1, album/song2], true;
         ]);
     }
 
     #[test]
     fn case_2() {
         const MIN_LOCATIONS: usize = 1;
+        let album = AlbumName("ALBUM".to_string());
+        let song1 = SongName("S1".to_string());
+        let song2 = SongName("S2".to_string());
 
         let data = HashMap::from([
-            (ngram![A B C X Y], locations![L1]),
-            (ngram![D E F X Y], locations![L1 L2]),
+            (ngram![A B C X Y], locations![album / song1]),
+            (ngram![D E F X Y], locations![album / song1, album / song2]),
         ]);
         let data = prepare_max_size_ngrams(data);
         let data = consolidate(data, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C X Y], locations![L1], true;
-            ngram![D E F X Y], locations![L1 L2], true;
+            ngram![A B C X Y], locations![album/song1], true;
+            ngram![D E F X Y], locations![album/song1, album/song2], true;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(4, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C X], locations![L1], false;
-            ngram![B C X Y], locations![L1], false;
-            ngram![D E F X], locations![L1 L2], false;
-            ngram![E F X Y], locations![L1 L2], false;
+            ngram![A B C X], locations![album/song1], false;
+            ngram![B C X Y], locations![album/song1], false;
+            ngram![D E F X], locations![album/song1, album/song2], false;
+            ngram![E F X Y], locations![album/song1, album/song2], false;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(3, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C], locations![L1], false;
-            ngram![B C X], locations![L1], false;
-            ngram![C X Y], locations![L1], false;
-            ngram![D E F], locations![L1 L2], false;
-            ngram![E F X], locations![L1 L2], false;
-            ngram![F X Y], locations![L1 L2], false;
+            ngram![A B C], locations![album/song1], false;
+            ngram![B C X], locations![album/song1], false;
+            ngram![C X Y], locations![album/song1], false;
+            ngram![D E F], locations![album/song1, album/song2], false;
+            ngram![E F X], locations![album/song1, album/song2], false;
+            ngram![F X Y], locations![album/song1, album/song2], false;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(2, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B], locations![L1], false;
-            ngram![B C], locations![L1], false;
-            ngram![C X], locations![L1], false;
-            ngram![D E], locations![L1 L2], false;
-            ngram![E F], locations![L1 L2], false;
-            ngram![F X], locations![L1 L2], false;
-            ngram![X Y], locations![L1 L2], true;
+            ngram![A B], locations![album/song1], false;
+            ngram![B C], locations![album/song1], false;
+            ngram![C X], locations![album/song1], false;
+            ngram![D E], locations![album/song1, album/song2], false;
+            ngram![E F], locations![album/song1, album/song2], false;
+            ngram![F X], locations![album/song1, album/song2], false;
+            ngram![X Y], locations![album/song1, album/song2], true;
         ]);
     }
 
     #[test]
     fn case_3() {
         const MIN_LOCATIONS: usize = 2;
+        let album = AlbumName("ALBUM".to_string());
+        let song1 = SongName("S1".to_string());
+        let song2 = SongName("S2".to_string());
 
         let data = HashMap::from([
-            (ngram![A B C X Y], locations![L1]),
-            (ngram![D E F X Y], locations![L1 L2]),
+            (ngram![A B C X Y], locations![album / song1]),
+            (ngram![D E F X Y], locations![album / song1, album / song2]),
         ]);
         let data = prepare_max_size_ngrams(data);
         let data = consolidate(data, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C X Y], locations![L1], false;
-            ngram![D E F X Y], locations![L1 L2], true;
+            ngram![A B C X Y], locations![album/song1], false;
+            ngram![D E F X Y], locations![album/song1, album/song2], true;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(4, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C X], locations![L1], false;
-            ngram![B C X Y], locations![L1], false;
-            ngram![D E F X], locations![L1 L2], false;
-            ngram![E F X Y], locations![L1 L2], false;
+            ngram![A B C X], locations![album/song1], false;
+            ngram![B C X Y], locations![album/song1], false;
+            ngram![D E F X], locations![album/song1, album/song2], false;
+            ngram![E F X Y], locations![album/song1, album/song2], false;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(3, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C], locations![L1], false;
-            ngram![B C X], locations![L1], false;
-            ngram![C X Y], locations![L1], false;
-            ngram![D E F], locations![L1 L2], false;
-            ngram![E F X], locations![L1 L2], false;
-            ngram![F X Y], locations![L1 L2], false;
+            ngram![A B C], locations![album/song1], false;
+            ngram![B C X], locations![album/song1], false;
+            ngram![C X Y], locations![album/song1], false;
+            ngram![D E F], locations![album/song1, album/song2], false;
+            ngram![E F X], locations![album/song1, album/song2], false;
+            ngram![F X Y], locations![album/song1, album/song2], false;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(2, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B], locations![L1], false;
-            ngram![B C], locations![L1], false;
-            ngram![C X], locations![L1], false;
-            ngram![D E], locations![L1 L2], false;
-            ngram![E F], locations![L1 L2], false;
-            ngram![F X], locations![L1 L2], false;
-            ngram![X Y], locations![L1 L2], false;
+            ngram![A B], locations![album/song1], false;
+            ngram![B C], locations![album/song1], false;
+            ngram![C X], locations![album/song1], false;
+            ngram![D E], locations![album/song1, album/song2], false;
+            ngram![E F], locations![album/song1, album/song2], false;
+            ngram![F X], locations![album/song1, album/song2], false;
+            ngram![X Y], locations![album/song1, album/song2], false;
         ]);
     }
 
     #[test]
     fn case_4() {
         const MIN_LOCATIONS: usize = 2;
+        let album = AlbumName("ALBUM".to_string());
+        let song1 = SongName("song1".to_string());
+        let song2 = SongName("S2".to_string());
 
         let data = HashMap::from([
-            (ngram![A B C X Y], locations![L1]),
-            (ngram![D E F X Y], locations![L2]),
+            (ngram![A B C X Y], locations![album / song1]),
+            (ngram![D E F X Y], locations![album / song2]),
         ]);
         let data = prepare_max_size_ngrams(data);
         let data = consolidate(data, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C X Y], locations![L1], false;
-            ngram![D E F X Y], locations![L2], false;
+            ngram![A B C X Y], locations![album/song1], false;
+            ngram![D E F X Y], locations![album/song2], false;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(4, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C X], locations![L1], false;
-            ngram![B C X Y], locations![L1], false;
-            ngram![D E F X], locations![L2], false;
-            ngram![E F X Y], locations![L2], false;
+            ngram![A B C X], locations![album/song1], false;
+            ngram![B C X Y], locations![album/song1], false;
+            ngram![D E F X], locations![album/song2], false;
+            ngram![E F X Y], locations![album/song2], false;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(3, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B C], locations![L1], false;
-            ngram![B C X], locations![L1], false;
-            ngram![C X Y], locations![L1], false;
-            ngram![D E F], locations![L2], false;
-            ngram![E F X], locations![L2], false;
-            ngram![F X Y], locations![L2], false;
+            ngram![A B C], locations![album/song1], false;
+            ngram![B C X], locations![album/song1], false;
+            ngram![C X Y], locations![album/song1], false;
+            ngram![D E F], locations![album/song2], false;
+            ngram![E F X], locations![album/song2], false;
+            ngram![F X Y], locations![album/song2], false;
         ]);
 
         let shorter_ngrams = generate_shorter_ngrams(2, &data);
         let data = consolidate(shorter_ngrams, MIN_LOCATIONS);
         assert_infos!(data, [
-            ngram![A B], locations![L1], false;
-            ngram![B C], locations![L1], false;
-            ngram![C X], locations![L1], false;
-            ngram![D E], locations![L2], false;
-            ngram![E F], locations![L2], false;
-            ngram![F X], locations![L2], false;
-            ngram![X Y], locations![L1 L2], true;
+            ngram![A B], locations![album/song1], false;
+            ngram![B C], locations![album/song1], false;
+            ngram![C X], locations![album/song1], false;
+            ngram![D E], locations![album/song2], false;
+            ngram![E F], locations![album/song2], false;
+            ngram![F X], locations![album/song2], false;
+            ngram![X Y], locations![album/song1, album/song2], true;
         ]);
     }
 }
