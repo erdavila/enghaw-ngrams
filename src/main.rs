@@ -5,7 +5,6 @@ use std::{
     fs::{read_dir, DirEntry, File, FileType},
     io::{BufRead, BufReader},
     path::Path,
-    rc::Rc,
 };
 
 use anyhow::{anyhow, Ok, Result};
@@ -164,13 +163,7 @@ fn extract_ngrams(
             }
 
             for i in 0..=(song_tokens.len() - ngrams_size) {
-                let ngram = &song_tokens[i..(i + ngrams_size)];
-                let ngram = NGram(
-                    ngram
-                        .iter()
-                        .map(|token| Word(Rc::from(token.0.clone())))
-                        .collect(),
-                );
+                let ngram = NGram(&song_tokens[i..(i + ngrams_size)]);
 
                 ngrams
                     .entry(ngram)
@@ -197,7 +190,7 @@ impl<'loc, 'info> ProcessingInfo<'loc, 'info> {
         }
     }
 
-    fn add(&mut self, info: &'info Info<'loc>) {
+    fn add(&mut self, info: &'info Info<'_, 'loc>) {
         self.locations.extend(&info.locations);
         match &info.show_decision {
             ShowDecision::Show => {
@@ -210,9 +203,9 @@ impl<'loc, 'info> ProcessingInfo<'loc, 'info> {
     }
 }
 
-fn prepare_max_size_ngrams(
-    data: HashMap<NGram, BTreeSet<Location>>,
-) -> HashMap<NGram, ProcessingInfo> {
+fn prepare_max_size_ngrams<'tok, 'loc, 'info>(
+    data: HashMap<NGram<'tok>, BTreeSet<Location<'loc>>>,
+) -> HashMap<NGram<'tok>, ProcessingInfo<'loc, 'info>> {
     data.into_iter()
         .map(|(ngram, locations)| {
             let pi = ProcessingInfo {
@@ -224,8 +217,8 @@ fn prepare_max_size_ngrams(
         .collect()
 }
 
-struct Info<'loc> {
-    ngram: NGram,
+struct Info<'tok, 'loc> {
+    ngram: NGram<'tok>,
     locations: BTreeSet<Location<'loc>>,
     show_decision: ShowDecision<'loc>,
 }
@@ -236,10 +229,10 @@ enum ShowDecision<'loc> {
     ShownIn(HashSet<BTreeSet<Location<'loc>>>),
 }
 
-fn consolidate<'loc>(
-    ngrams: HashMap<NGram, ProcessingInfo<'loc, '_>>,
+fn consolidate<'tok, 'loc>(
+    ngrams: HashMap<NGram<'tok>, ProcessingInfo<'loc, '_>>,
     min_locations: usize,
-) -> Vec<Info<'loc>> {
+) -> Vec<Info<'tok, 'loc>> {
     ngrams
         .into_iter()
         .map(|(ngram, pi)| {
@@ -289,18 +282,18 @@ fn print_ngrams_with_size(ngrams_size: usize, data: &mut Vec<Info>) {
     }
 }
 
-fn generate_shorter_ngrams<'loc, 'info>(
+fn generate_shorter_ngrams<'tok, 'loc, 'info>(
     ngrams_size: usize,
-    data: &'info Vec<Info<'loc>>,
-) -> HashMap<NGram, ProcessingInfo<'loc, 'info>> {
+    data: &'info Vec<Info<'tok, 'loc>>,
+) -> HashMap<NGram<'tok>, ProcessingInfo<'loc, 'info>> {
     let mut output: HashMap<_, ProcessingInfo> = HashMap::new();
 
     for info in data {
         assert!(!info.locations.is_empty());
 
         assert_eq!(info.ngram.0.len(), ngrams_size + 1);
-        let prefix_ngram = NGram(info.ngram.0[..ngrams_size].to_vec());
-        let suffix_ngram = NGram(info.ngram.0[1..].to_vec());
+        let prefix_ngram = NGram(&info.ngram.0[..ngrams_size]);
+        let suffix_ngram = NGram(&info.ngram.0[1..]);
 
         for shorter_ngram in [prefix_ngram, suffix_ngram] {
             assert_eq!(shorter_ngram.0.len(), ngrams_size);
@@ -337,27 +330,24 @@ impl Display for SongName {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-struct Word(Rc<str>);
-impl Display for Word {
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+struct Token(String);
+impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-#[derive(Debug)]
-struct Token(String);
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-struct NGram(Vec<Word>);
-impl Display for NGram {
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+struct NGram<'tok>(&'tok [Token]);
+impl<'tok> Display for NGram<'tok> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[")?;
-        for (i, word) in self.0.iter().enumerate() {
+        for (i, token) in self.0.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{word}")?;
+            write!(f, "{token}")?;
         }
         write!(f, "]")
     }
@@ -373,12 +363,22 @@ fn os_str_to_str(os_str: &OsStr) -> Result<&str> {
 mod tests {
     use super::*;
 
+    macro_rules! tokens {
+        ($( $token:ident )+) => {
+            vec![
+                $(
+                    Token(stringify!($token).to_string())
+                ),+
+            ]
+        };
+    }
+
     macro_rules! ngram {
-        ($( $ident:ident )+) => {
+        ($( $token:ident )+) => {
             NGram(
-                vec![
+                &vec![
                     $(
-                        Word(Rc::from(stringify!($ident)))
+                        Token(stringify!($token).to_string())
                     ),+
                 ]
             )
@@ -398,46 +398,34 @@ mod tests {
     }
 
     macro_rules! assert_infos {
-        ($infos:ident, [ $( $ngram:expr, $location:expr, $show:literal );+ $(;)? ]) => {
-            {
-                let infos = &$infos;
-                let mut expected = HashMap::from([
+        ($infos:ident, [ $( $ngram:expr, $locations:expr, $show:literal );+ $(;)? ]) => {
+            assert_eq!(
+                HashMap::from_iter(
+                    $infos
+                        .iter()
+                        .map(|info| (&info.ngram, (&info.locations, info.show_decision == ShowDecision::Show)))
+                ),
+                HashMap::from([
                     $(
-                        ($ngram, ($location, $show))
+                        (&$ngram, (&$locations, $show))
                     ),+
-                ]);
-
-                for info in infos {
-                    match expected.remove(&info.ngram) {
-                        Some((locations, show)) => {
-                            assert_eq!(info.locations, locations, "{}", info.ngram);
-                            if show {
-                                assert_eq!(info.show_decision, ShowDecision::Show, "{}", info.ngram);
-                            } else {
-                                assert_ne!(info.show_decision, ShowDecision::Show, "{}", info.ngram);
-                            }
-                        },
-                        None => panic!("Not expected: {}", info.ngram),
-                    }
-                }
-
-                if !expected.is_empty() {
-                    panic!("Expected: {:?}", expected);
-                }
-            }
+                ])
+            );
         };
     }
 
     #[test]
     fn case_1() {
         const MIN_LOCATIONS: usize = 1;
+        let abcxy_tokens = tokens![A B C X Y];
+        let defxy_tokens = tokens![D E F X Y];
         let album = AlbumName("ALBUM".to_string());
         let song1 = SongName("S1".to_string());
         let song2 = SongName("S2".to_string());
 
         let data = HashMap::from([
-            (ngram![A B C X Y], locations![album / song1]),
-            (ngram![D E F X Y], locations![album / song2]),
+            (NGram(&abcxy_tokens), locations![album / song1]),
+            (NGram(&defxy_tokens), locations![album / song2]),
         ]);
         let data = prepare_max_size_ngrams(data);
         let data = consolidate(data, MIN_LOCATIONS);
@@ -482,13 +470,18 @@ mod tests {
     #[test]
     fn case_2() {
         const MIN_LOCATIONS: usize = 1;
+        let abcxy_tokens = tokens![A B C X Y];
+        let defxy_tokens = tokens![D E F X Y];
         let album = AlbumName("ALBUM".to_string());
         let song1 = SongName("S1".to_string());
         let song2 = SongName("S2".to_string());
 
         let data = HashMap::from([
-            (ngram![A B C X Y], locations![album / song1]),
-            (ngram![D E F X Y], locations![album / song1, album / song2]),
+            (NGram(&abcxy_tokens), locations![album / song1]),
+            (
+                NGram(&defxy_tokens),
+                locations![album / song1, album / song2],
+            ),
         ]);
         let data = prepare_max_size_ngrams(data);
         let data = consolidate(data, MIN_LOCATIONS);
@@ -533,13 +526,18 @@ mod tests {
     #[test]
     fn case_3() {
         const MIN_LOCATIONS: usize = 2;
+        let abcxy_tokens = tokens![A B C X Y];
+        let defxy_tokens = tokens![D E F X Y];
         let album = AlbumName("ALBUM".to_string());
         let song1 = SongName("S1".to_string());
         let song2 = SongName("S2".to_string());
 
         let data = HashMap::from([
-            (ngram![A B C X Y], locations![album / song1]),
-            (ngram![D E F X Y], locations![album / song1, album / song2]),
+            (NGram(&abcxy_tokens), locations![album / song1]),
+            (
+                NGram(&defxy_tokens),
+                locations![album / song1, album / song2],
+            ),
         ]);
         let data = prepare_max_size_ngrams(data);
         let data = consolidate(data, MIN_LOCATIONS);
@@ -584,13 +582,15 @@ mod tests {
     #[test]
     fn case_4() {
         const MIN_LOCATIONS: usize = 2;
+        let abcxy_tokens = tokens![A B C X Y];
+        let defxy_tokens = tokens![D E F X Y];
         let album = AlbumName("ALBUM".to_string());
         let song1 = SongName("song1".to_string());
         let song2 = SongName("S2".to_string());
 
         let data = HashMap::from([
-            (ngram![A B C X Y], locations![album / song1]),
-            (ngram![D E F X Y], locations![album / song2]),
+            (NGram(&abcxy_tokens), locations![album / song1]),
+            (NGram(&defxy_tokens), locations![album / song2]),
         ]);
         let data = prepare_max_size_ngrams(data);
         let data = consolidate(data, MIN_LOCATIONS);
